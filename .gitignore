@@ -1,0 +1,26 @@
+# Node
+node_modules/
+node_modules_old/
+
+# Env
+.env
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Mobile legacy
+mobile-app-legacy/
+
+# Uploads
+backend/uploads/
+
