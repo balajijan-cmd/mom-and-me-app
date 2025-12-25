@@ -1,14 +1,18 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'const API_URL = 'https://mom-and-me-backend.onrender.com/api';
-';
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  'https://mom-and-me-backend.onrender.com/api';
 
 const api = axios.create({
-    baseURL: API_URL,
-    headers: {
-        'Content-Type': 'application/json'
-    }
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json'
+  }
 });
+
+export default api;
+
 
 // Add token to requests
 api.interceptors.request.use((config) => {
