@@ -11,35 +11,49 @@ const app = express();
 // Connect to database
 connectDB();
 
-// Middleware - CORS Configuration
+// Middleware - CORS Configuration (Simplified for Production)
 const allowedOrigins = [
     'https://momnme.vercel.app',
     'http://localhost:5173',
-    'http://localhost:3000',
-    process.env.FRONTEND_URL
-].filter(Boolean); // Remove undefined values
+    'http://localhost:3000'
+];
+
+// Add FRONTEND_URL from environment if it exists
+if (process.env.FRONTEND_URL) {
+    allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+console.log('🔐 CORS allowed origins:', allowedOrigins);
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
-        if (!origin) return callback(null, true);
+        // Allow requests with no origin (mobile apps, curl, Postman, etc.)
+        if (!origin) {
+            return callback(null, true);
+        }
 
-        // Allow all origins in development
+        // Check if the origin is in our allowed list
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        // Log blocked attempts for debugging
+        console.log('⚠️ CORS blocked origin:', origin);
+        console.log('   Allowed origins:', allowedOrigins);
+
+        // In development, allow all origins
         if (process.env.NODE_ENV !== 'production') {
             return callback(null, true);
         }
 
-        // Check if origin is in allowed list
-        if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
-            callback(null, true);
-        } else {
-            console.log('CORS blocked origin:', origin);
-            callback(new Error('Not allowed by CORS'));
-        }
+        // Block the request
+        callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range'],
+    maxAge: 600 // Cache preflight for 10 minutes
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
