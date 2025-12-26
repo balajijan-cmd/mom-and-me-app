@@ -2,7 +2,8 @@ import axios from 'axios';
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
-  'https://mom-and-me-backend.onrender.com/api';
+  'https://mom-and-me-app.onrender.com/api'; // ✅ CORRECTED URL!
+
 
 const api = axios.create({
   baseURL: API_URL,
