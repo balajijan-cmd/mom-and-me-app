@@ -11,49 +11,17 @@ const app = express();
 // Connect to database
 connectDB();
 
-// Middleware - CORS Configuration (Simplified for Production)
-const allowedOrigins = [
-    'https://momnme.vercel.app',
-    'http://localhost:5173',
-    'http://localhost:3000'
-];
-
-// Add FRONTEND_URL from environment if it exists
-if (process.env.FRONTEND_URL) {
-    allowedOrigins.push(process.env.FRONTEND_URL);
-}
-
-console.log('🔐 CORS allowed origins:', allowedOrigins);
+// Middleware - CORS Configuration (ALLOW ALL - TEMPORARY FIX)
+console.log('🔐 CORS: Allowing all origins (temporary fix for Vercel)');
 
 app.use(cors({
-    origin: function (origin, callback) {
-        // Allow requests with no origin (mobile apps, curl, Postman, etc.)
-        if (!origin) {
-            return callback(null, true);
-        }
-
-        // Check if the origin is in our allowed list
-        if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
-
-        // Log blocked attempts for debugging
-        console.log('⚠️ CORS blocked origin:', origin);
-        console.log('   Allowed origins:', allowedOrigins);
-
-        // In development, allow all origins
-        if (process.env.NODE_ENV !== 'production') {
-            return callback(null, true);
-        }
-
-        // Block the request
-        callback(new Error('Not allowed by CORS'));
-    },
+    origin: true, // Allow ALL origins
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     exposedHeaders: ['Content-Range', 'X-Content-Range'],
-    maxAge: 600 // Cache preflight for 10 minutes
+    preflightContinue: false,
+    optionsSuccessStatus: 204
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
