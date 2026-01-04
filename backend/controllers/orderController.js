@@ -1,375 +1,223 @@
-const Order = require('../models/Order');
+const { db, bucket } = require('../config/firebase');
 const { asyncHandler } = require('../middleware/errorHandler');
-const generateOrderNo = require('../utils/generateOrderNo');
-const { cloudinary, uploadToCloudinary } = require('../config/cloudinary');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 
-// @desc    Get all orders with pagination, search, and filters
+// Helper to get Orders Collection
+const ordersColl = db.collection('orders');
+
+// @desc    Get all orders
 // @route   GET /api/orders
-// @access  Private
 exports.getOrders = asyncHandler(async (req, res, next) => {
-    const {
-        page = 1,
-        limit = 10,
-        search,
-        status,
-        category,
-        startDate,
-        endDate,
-        paymentStatus,
-        sortBy = '-createdAt'
-    } = req.query;
+    let query = ordersColl;
 
-    // Build query
-    let query = {};
+    // Filtering
+    if (req.query.status) query = query.where('status', '==', req.query.status);
+    if (req.query.category) query = query.where('category', '==', req.query.category);
 
-    // Search by customer name, phone, or order number
-    if (search) {
-        query.$or = [
-            { customerName: { $regex: search, $options: 'i' } },
-            { phoneNumber: { $regex: search, $options: 'i' } },
-            { orderNo: { $regex: search, $options: 'i' } },
-            { orderNoFromBook: { $regex: search, $options: 'i' } }
-        ];
-    }
+    // Note: Firestore doesn't support regex search easily (req.query.search).
+    // For now, we will fetch results and filter in memory if search is present (not efficient for huge data, but fine for small shop)
 
-    // Filter by status
-    if (status) {
-        query.status = status;
-    }
-
-    // Filter by category
-    if (category) {
-        query.category = category;
-    }
-
-    // Filter by date range
-    if (startDate || endDate) {
-        query.orderDate = {};
-        if (startDate) query.orderDate.$gte = new Date(startDate);
-        if (endDate) query.orderDate.$lte = new Date(endDate);
-    }
-
-    // Filter by payment status
-    if (paymentStatus) {
-        if (paymentStatus === 'Paid') {
-            query.balance = 0;
-        } else if (paymentStatus === 'Unpaid') {
-            query.advanceAmountPaid = 0;
-            query.balanceAmountReceived = 0;
-        } else if (paymentStatus === 'Partial') {
-            query.$or = [
-                { advanceAmountPaid: { $gt: 0 } },
-                { balanceAmountReceived: { $gt: 0 } }
-            ];
-            query.balance = { $gt: 0 };
-        }
-    }
-
-    // Execute query with pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const orders = await Order.find(query)
-        .populate('createdBy', 'fullName username')
-        .sort(sortBy)
-        .limit(parseInt(limit))
-        .skip(skip);
-
-    // Get total count for pagination
-    const total = await Order.countDocuments(query);
-
-    res.status(200).json({
-        success: true,
-        count: orders.length,
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-        data: orders
+    // Sorting: Firestore requires index for sorting on different fields. 
+    // We'll simplisticly get all and sort/filter in JS for this migration to be robust without index setup.
+    const snapshot = await query.get();
+    let orders = [];
+    snapshot.forEach(doc => {
+        orders.push({ ...doc.data(), _id: doc.id, id: doc.id });
     });
+
+    if (req.query.search) {
+        const search = req.query.search.toLowerCase();
+        orders = orders.filter(o =>
+            (o.customerName && o.customerName.toLowerCase().includes(search)) ||
+            (o.orderNo && o.orderNo.toLowerCase().includes(search)) ||
+            (o.phoneNumber && o.phoneNumber.includes(search))
+        );
+    }
+
+    // Manual date sort desc
+    orders.sort((a, b) => new Date(b.createdAt || b.orderDate) - new Date(a.createdAt || a.orderDate));
+
+    res.status(200).json({ success: true, count: orders.length, data: orders });
 });
 
 // @desc    Get single order
 // @route   GET /api/orders/:id
-// @access  Private
 exports.getOrder = asyncHandler(async (req, res, next) => {
-    const order = await Order.findById(req.params.id)
-        .populate('createdBy', 'fullName username')
-        .populate('statusHistory.changedBy', 'fullName username');
-
-    if (!order) {
-        return res.status(404).json({
-            success: false,
-            message: 'Order not found'
-        });
+    const doc = await ordersColl.doc(req.params.id).get();
+    if (!doc.exists) {
+        return res.status(404).json({ success: false, message: 'Order not found' });
     }
-
-    res.status(200).json({
-        success: true,
-        data: order
-    });
+    res.status(200).json({ success: true, data: { ...doc.data(), _id: doc.id, id: doc.id } });
 });
 
 // @desc    Create new order
 // @route   POST /api/orders
-// @access  Private
 exports.createOrder = asyncHandler(async (req, res, next) => {
-    // Generate order number
-    const orderNo = await generateOrderNo();
+    // Generate Order No if not exists (Simple logic: Count + 1 or Random)
+    // Using simple random for now to avoid concurrency issues without transactions
+    if (!req.body.orderNo) {
+        const count = (await ordersColl.count().get()).data().count;
+        req.body.orderNo = `ORD-${1000 + count + 1}`;
+    }
 
-    // Add order number and user to request body
-    req.body.orderNo = orderNo;
-    req.body.createdBy = req.user.id;
-
-    // Add initial status to history
-    req.body.statusHistory = [{
+    const newOrder = {
+        ...req.body,
+        user: req.user.id, // Store creator ID
+        createdAt: new Date().toISOString(),
         status: req.body.status || 'Pending',
-        changedBy: req.user.id,
-        changedAt: new Date()
-    }];
+        customerPhotos: [],
+        balance: (Number(req.body.totalAmount) || 0) - (Number(req.body.advanceAmountPaid) || 0) - (Number(req.body.balanceAmountReceived) || 0)
+    };
 
-    const order = await Order.create(req.body);
+    const docRef = await ordersColl.add(newOrder);
 
-    res.status(201).json({
-        success: true,
-        data: order
-    });
+    res.status(201).json({ success: true, data: { ...newOrder, _id: docRef.id, id: docRef.id } });
 });
 
 // @desc    Update order
 // @route   PUT /api/orders/:id
-// @access  Private
 exports.updateOrder = asyncHandler(async (req, res, next) => {
-    let order = await Order.findById(req.params.id);
+    const docRef = ordersColl.doc(req.params.id);
+    const doc = await docRef.get();
 
-    if (!order) {
-        return res.status(404).json({
-            success: false,
-            message: 'Order not found'
-        });
-    }
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    // Check if status is being updated
-    if (req.body.status && req.body.status !== order.status) {
-        // Add to status history
-        if (!order.statusHistory) {
-            order.statusHistory = [];
-        }
-        order.statusHistory.push({
-            status: req.body.status,
-            changedBy: req.user.id,
-            changedAt: new Date()
-        });
-    }
+    let updateData = { ...req.body };
 
-    // Update order
-    order = await Order.findByIdAndUpdate(req.params.id, req.body, {
-        new: true,
-        runValidators: true
-    });
+    // Recalculate balance
+    // Need to merge with existing data to calculate correctly if fields are missing in update
+    const currentData = doc.data();
+    const total = updateData.totalAmount !== undefined ? Number(updateData.totalAmount) : Number(currentData.totalAmount || 0);
+    const advance = updateData.advanceAmountPaid !== undefined ? Number(updateData.advanceAmountPaid) : Number(currentData.advanceAmountPaid || 0);
+    const received = updateData.balanceAmountReceived !== undefined ? Number(updateData.balanceAmountReceived) : Number(currentData.balanceAmountReceived || 0);
 
-    res.status(200).json({
-        success: true,
-        data: order
-    });
+    updateData.balance = total - advance - received;
+
+    await docRef.update(updateData);
+
+    const updatedDoc = await docRef.get();
+    res.status(200).json({ success: true, data: { ...updatedDoc.data(), _id: updatedDoc.id, id: updatedDoc.id } });
 });
 
 // @desc    Delete order
 // @route   DELETE /api/orders/:id
-// @access  Private
 exports.deleteOrder = asyncHandler(async (req, res, next) => {
-    const order = await Order.findById(req.params.id);
+    const docRef = ordersColl.doc(req.params.id);
+    const doc = await docRef.get();
 
-    if (!order) {
-        return res.status(404).json({
-            success: false,
-            message: 'Order not found'
-        });
-    }
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    // Delete associated images from Cloudinary
-    if (order.customerPhotos && order.customerPhotos.length > 0) {
-        for (const photoUrl of order.customerPhotos) {
-            try {
-                // Extract public_id from Cloudinary URL
-                const publicId = photoUrl.split('/').slice(-2).join('/').split('.')[0];
-                await cloudinary.uploader.destroy(publicId);
-            } catch (error) {
-                console.error('Error deleting image from Cloudinary:', error);
-            }
-        }
-    }
+    // TODO: Delete images from storage if needed
 
-    await order.deleteOne();
-
-    res.status(200).json({
-        success: true,
-        message: 'Order deleted successfully'
-    });
+    await docRef.delete();
+    res.status(200).json({ success: true, data: {} });
 });
 
-// @desc    Upload customer photos
+// @desc    Upload photos
 // @route   POST /api/orders/:id/photos
-// @access  Private
 exports.uploadPhotos = asyncHandler(async (req, res, next) => {
-    const order = await Order.findById(req.params.id);
+    const docRef = ordersColl.doc(req.params.id);
+    const doc = await docRef.get();
 
-    if (!order) {
-        return res.status(404).json({
-            success: false,
-            message: 'Order not found'
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: 'No files uploaded' });
+
+    const photoUrls = [];
+
+    for (const file of req.files) {
+        const filename = `orders/${req.params.id}/${uuidv4()}${path.extname(file.originalname)}`;
+        const fileRef = bucket.file(filename);
+
+        await fileRef.save(file.buffer, {
+            contentType: file.mimetype,
+            metadata: {
+                firebaseStorageDownloadTokens: uuidv4() // Fake token for console view
+            }
         });
+
+        // Make public
+        await fileRef.makePublic();
+
+        // Construct public URL
+        const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filename}`;
+        photoUrls.push(publicUrl);
     }
 
-    if (!req.files || req.files.length === 0) {
-        return res.status(400).json({
-            success: false,
-            message: 'Please upload at least one photo'
-        });
-    }
+    // Update order with new photos (append)
+    const currentPhotos = doc.data().customerPhotos || [];
+    const newPhotos = [...currentPhotos, ...photoUrls];
 
-    // Upload files to Cloudinary
-    const uploadPromises = req.files.map(file =>
-        uploadToCloudinary(file.buffer, file.originalname)
-    );
+    await docRef.update({ customerPhotos: newPhotos });
 
-    const photoUrls = await Promise.all(uploadPromises);
-
-    // Add to existing photos
-    order.customerPhotos = [...(order.customerPhotos || []), ...photoUrls];
-    await order.save();
-
-    res.status(200).json({
-        success: true,
-        data: order
-    });
+    res.status(200).json({ success: true, data: newPhotos });
 });
 
-// @desc    Delete customer photo
+// @desc    Delete photo
 // @route   DELETE /api/orders/:id/photos/:photoIndex
-// @access  Private
 exports.deletePhoto = asyncHandler(async (req, res, next) => {
-    const order = await Order.findById(req.params.id);
+    const docRef = ordersColl.doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Not found' });
 
-    if (!order) {
-        return res.status(404).json({
-            success: false,
-            message: 'Order not found'
-        });
-    }
+    const photos = doc.data().customerPhotos || [];
+    const index = parseInt(req.params.photoIndex);
 
-    const photoIndex = parseInt(req.params.photoIndex);
+    if (index < 0 || index >= photos.length) return res.status(400).json({ message: 'Invalid index' });
 
-    if (photoIndex < 0 || photoIndex >= order.customerPhotos.length) {
-        return res.status(400).json({
-            success: false,
-            message: 'Invalid photo index'
-        });
-    }
+    // Remove from array (We don't delete from storage in this simple logic as we only have URL)
+    photos.splice(index, 1);
 
-    const photoUrl = order.customerPhotos[photoIndex];
-
-    // Delete from Cloudinary
-    try {
-        const publicId = photoUrl.split('/').slice(-2).join('/').split('.')[0];
-        await cloudinary.uploader.destroy(publicId);
-    } catch (error) {
-        console.error('Error deleting image from Cloudinary:', error);
-    }
-
-    // Remove from array
-    order.customerPhotos.splice(photoIndex, 1);
-    await order.save();
-
-    res.status(200).json({
-        success: true,
-        data: order
-    });
+    await docRef.update({ customerPhotos: photos });
+    res.status(200).json({ success: true, data: photos });
 });
 
-// @desc    Get upcoming trials (next 7 days)
-// @route   GET /api/orders/upcoming/trials
-// @access  Private
-exports.getUpcomingTrials = asyncHandler(async (req, res, next) => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const nextWeek = new Date(today);
-    nextWeek.setDate(nextWeek.getDate() + 7);
-
-    const orders = await Order.find({
-        trialDate: {
-            $gte: today,
-            $lte: nextWeek
-        },
-        status: { $ne: 'Completed' }
-    })
-        .populate('createdBy', 'fullName')
-        .sort('trialDate');
-
-    res.status(200).json({
-        success: true,
-        count: orders.length,
-        data: orders
-    });
-});
-
-// @desc    Get upcoming deliveries (next 7 days)
-// @route   GET /api/orders/upcoming/deliveries
-// @access  Private
-exports.getUpcomingDeliveries = asyncHandler(async (req, res, next) => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const nextWeek = new Date(today);
-    nextWeek.setDate(nextWeek.getDate() + 7);
-
-    const orders = await Order.find({
-        deliveryDate: {
-            $gte: today,
-            $lte: nextWeek
-        },
-        status: { $ne: 'Completed' }
-    })
-        .populate('createdBy', 'fullName')
-        .sort('deliveryDate');
-
-    res.status(200).json({
-        success: true,
-        count: orders.length,
-        data: orders
-    });
-});
-
-// @desc    Get order statistics
-// @route   GET /api/orders/stats
-// @access  Private
+// @desc    Get order stats
 exports.getOrderStats = asyncHandler(async (req, res, next) => {
-    const stats = await Order.aggregate([
-        {
-            $group: {
-                _id: null,
-                totalOrders: { $sum: 1 },
-                totalRevenue: { $sum: '$totalAmount' },
-                totalAdvance: { $sum: '$advanceAmountPaid' },
-                totalBalanceReceived: { $sum: '$balanceAmountReceived' },
-                totalPending: { $sum: '$balance' }
-            }
-        }
-    ]);
+    // In efficient Firestore, we should maintain counters.
+    // For this app size, aggregation via reading all is acceptable.
+    const snapshot = await ordersColl.get();
 
-    const statusCounts = await Order.aggregate([
-        {
-            $group: {
-                _id: '$status',
-                count: { $sum: 1 }
-            }
-        }
-    ]);
+    let stats = {
+        totalOrders: 0,
+        pending: 0,
+        completed: 0
+    };
 
-    res.status(200).json({
-        success: true,
-        data: {
-            overall: stats[0] || {},
-            byStatus: statusCounts
-        }
+    snapshot.forEach(doc => {
+        const d = doc.data();
+        stats.totalOrders++;
+        if (d.status === 'Completed') stats.completed++;
+        else stats.pending++;
     });
+
+    res.status(200).json({ success: true, data: stats });
+});
+
+// @desc    Get upcoming trials
+exports.getUpcomingTrials = asyncHandler(async (req, res, next) => {
+    const today = new Date().toISOString().split('T')[0];
+    const snapshot = await ordersColl
+        .where('trialDate', '>=', today)
+        .orderBy('trialDate', 'asc')
+        .limit(10)
+        .get();
+
+    const orders = [];
+    snapshot.forEach(doc => orders.push({ ...doc.data(), _id: doc.id }));
+    res.status(200).json({ success: true, data: orders });
+});
+
+// @desc    Get upcoming deliveries
+exports.getUpcomingDeliveries = asyncHandler(async (req, res, next) => {
+    const today = new Date().toISOString().split('T')[0];
+    const snapshot = await ordersColl
+        .where('deliveryDate', '>=', today)
+        .orderBy('deliveryDate', 'asc')
+        .limit(10)
+        .get();
+
+    const orders = [];
+    snapshot.forEach(doc => orders.push({ ...doc.data(), _id: doc.id }));
+    res.status(200).json({ success: true, data: orders });
 });

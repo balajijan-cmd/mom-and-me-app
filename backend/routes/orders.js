@@ -13,7 +13,7 @@ const {
     getOrderStats
 } = require('../controllers/orderController');
 const { protect } = require('../middleware/auth');
-const { upload } = require('../config/cloudinary');
+const { upload } = require('../config/multer');
 
 // All routes are protected
 router.use(protect);

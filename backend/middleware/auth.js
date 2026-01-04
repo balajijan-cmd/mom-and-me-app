@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const { db } = require('../config/firebase');
 
 // Protect routes - verify JWT token
 exports.protect = async (req, res, next) => {
@@ -25,25 +25,32 @@ exports.protect = async (req, res, next) => {
         // Verify token
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-        // Get user from token
-        req.user = await User.findById(decoded.id);
+        // Get user from Firestore
+        const userDoc = await db.collection('users').doc(decoded.id).get();
 
-        if (!req.user) {
+        if (!userDoc.exists) {
             return res.status(401).json({
                 success: false,
-                message: 'User not found. Please login again.'
+                message: 'User no longer exists.'
             });
         }
 
-        if (!req.user.isActive) {
+        const user = userDoc.data();
+        // Attach user ID manually since it's not in the data usually
+        user._id = userDoc.id;
+        user.id = userDoc.id; // consistency
+
+        if (!user.isActive) {
             return res.status(401).json({
                 success: false,
                 message: 'Your account has been deactivated. Please contact administrator.'
             });
         }
 
+        req.user = user;
         next();
     } catch (error) {
+        console.error("Auth Middleware Error:", error);
         return res.status(401).json({
             success: false,
             message: 'Invalid or expired token. Please login again.'
@@ -59,15 +66,15 @@ exports.getSignedJwtToken = (userId) => {
 };
 
 // Send token response
-exports.sendTokenResponse = (user, statusCode, res) => {
-    // Create token
-    const token = exports.getSignedJwtToken(user._id);
+exports.sendTokenResponse = (user, statusCode, res, token = null) => {
+    // Create token if not passed
+    const authToken = token || exports.getSignedJwtToken(user._id || user.id);
 
     res.status(statusCode).json({
         success: true,
-        token,
+        token: authToken,
         user: {
-            id: user._id,
+            id: user._id || user.id,
             username: user.username,
             fullName: user.fullName,
             role: user.role

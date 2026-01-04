@@ -1,43 +1,56 @@
-const User = require('../models/User');
+const { db } = require('../config/firebase');
 const { sendTokenResponse } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
-// @desc    Register new user (admin only - first user can self-register)
+// Helper to compare password
+const comparePassword = async (candidatePassword, userPassword) => {
+    return await bcrypt.compare(candidatePassword, userPassword);
+};
+
+// @desc    Register new user
 // @route   POST /api/auth/register
-// @access  Public (for first user) / Private (for subsequent users)
+// @access  Public (for first user) / Private
 exports.register = asyncHandler(async (req, res, next) => {
     const { username, password, fullName } = req.body;
 
-    // Validation
     if (!username || !password || !fullName) {
-        return res.status(400).json({
-            success: false,
-            message: 'Please provide username, password, and full name'
-        });
+        return res.status(400).json({ success: false, message: 'Please provide username, password, and full name' });
     }
 
-    // Check if this is the first user
-    const userCount = await User.countDocuments();
+    const usersRef = db.collection('users');
+    const snapshot = await usersRef.where('username', '==', username).get();
 
-    // If not first user, require authentication
-    if (userCount > 0 && !req.user) {
-        return res.status(401).json({
-            success: false,
-            message: 'Only existing admins can create new users'
-        });
+    if (!snapshot.empty) {
+        return res.status(400).json({ success: false, message: 'Username already exists' });
     }
 
-    // Create user
-    const user = await User.create({
+    // Check if first user
+    const allUsersSnapshot = await usersRef.limit(1).get();
+    const isFirstUser = allUsersSnapshot.empty;
+
+    if (!isFirstUser && !req.user) {
+        return res.status(401).json({ success: false, message: 'Only existing admins can create new users' });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const newUser = {
         username,
-        password,
+        password: hashedPassword,
         fullName,
-        role: 'admin'
-    });
+        role: 'admin',
+        isActive: true,
+        createdAt: new Date().toISOString()
+    };
 
-    // Send token response
-    sendTokenResponse(user, 201, res);
+    const docRef = await usersRef.add(newUser);
+    const userWithId = { ...newUser, _id: docRef.id };
+
+    sendTokenResponse(userWithId, 201, res);
 });
 
 // @desc    Login user
@@ -46,47 +59,34 @@ exports.register = asyncHandler(async (req, res, next) => {
 exports.login = asyncHandler(async (req, res, next) => {
     const { username, password } = req.body;
 
-    // Validation
     if (!username || !password) {
-        return res.status(400).json({
-            success: false,
-            message: 'Please provide username and password'
-        });
+        return res.status(400).json({ success: false, message: 'Please provide username and password' });
     }
 
-    // Check for user (include password field)
-    const user = await User.findOne({ username }).select('+password');
+    const usersRef = db.collection('users');
+    const snapshot = await usersRef.where('username', '==', username).limit(1).get();
 
-    if (!user) {
-        return res.status(401).json({
-            success: false,
-            message: 'Invalid credentials'
-        });
+    if (snapshot.empty) {
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    // Check if user is active
+    const userDoc = snapshot.docs[0];
+    const user = userDoc.data();
+    user._id = userDoc.id;
+
     if (!user.isActive) {
-        return res.status(401).json({
-            success: false,
-            message: 'Your account has been deactivated. Please contact administrator.'
-        });
+        return res.status(401).json({ success: false, message: 'Account deactivated' });
     }
 
-    // Check if password matches
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await comparePassword(password, user.password);
 
     if (!isMatch) {
-        return res.status(401).json({
-            success: false,
-            message: 'Invalid credentials'
-        });
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
     // Update last login
-    user.lastLogin = Date.now();
-    await user.save();
+    await userDoc.ref.update({ lastLogin: new Date().toISOString() });
 
-    // Send token response
     sendTokenResponse(user, 200, res);
 });
 
@@ -94,175 +94,88 @@ exports.login = asyncHandler(async (req, res, next) => {
 // @route   GET /api/auth/me
 // @access  Private
 exports.getMe = asyncHandler(async (req, res, next) => {
-    const user = await User.findById(req.user.id);
-
-    res.status(200).json({
-        success: true,
-        data: user
-    });
+    // req.user is set by protect middleware
+    res.status(200).json({ success: true, data: req.user });
 });
 
 // @desc    Update user details
 // @route   PUT /api/auth/updatedetails
-// @access  Private
 exports.updateDetails = asyncHandler(async (req, res, next) => {
-    const fieldsToUpdate = {
-        fullName: req.body.fullName,
-        username: req.body.username
-    };
+    const { fullName, username } = req.body;
+    const userRef = db.collection('users').doc(req.user.id);
 
-    const user = await User.findByIdAndUpdate(req.user.id, fieldsToUpdate, {
-        new: true,
-        runValidators: true
+    await userRef.update({
+        fullName: fullName || req.user.fullName,
+        username: username || req.user.username
     });
 
-    res.status(200).json({
-        success: true,
-        data: user
-    });
+    const updatedDoc = await userRef.get();
+    const updatedUser = { ...updatedDoc.data(), id: updatedDoc.id, _id: updatedDoc.id };
+
+    res.status(200).json({ success: true, data: updatedUser });
 });
 
 // @desc    Update password
 // @route   PUT /api/auth/updatepassword
-// @access  Private
 exports.updatePassword = asyncHandler(async (req, res, next) => {
-    const user = await User.findById(req.user.id).select('+password');
+    // In Firestore, we have to fetch the user again to get the password field if we didn't include it in req.user
+    // But let's assume we do a quick fetch
+    const userRef = db.collection('users').doc(req.user.id);
+    const doc = await userRef.get();
+    const userData = doc.data();
 
-    // Check current password
-    if (!(await user.comparePassword(req.body.currentPassword))) {
-        return res.status(401).json({
-            success: false,
-            message: 'Current password is incorrect'
-        });
+    if (!(await comparePassword(req.body.currentPassword, userData.password))) {
+        return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
 
-    // Validate new password
     if (!req.body.newPassword || req.body.newPassword.length < 6) {
-        return res.status(400).json({
-            success: false,
-            message: 'New password must be at least 6 characters long'
-        });
+        return res.status(400).json({ success: false, message: 'New password min 6 chars' });
     }
 
-    user.password = req.body.newPassword;
-    await user.save();
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(req.body.newPassword, salt);
 
-    sendTokenResponse(user, 200, res);
-});
+    await userRef.update({ password: hashedPassword });
 
-// @desc    Forgot password
-// @route   POST /api/auth/forgotpassword
-// @access  Public
-exports.forgotPassword = asyncHandler(async (req, res, next) => {
-    const user = await User.findOne({ username: req.body.username });
-
-    if (!user) {
-        return res.status(404).json({
-            success: false,
-            message: 'User not found'
-        });
-    }
-
-    // Get reset token
-    const resetToken = user.getResetPasswordToken();
-
-    await user.save({ validateBeforeSave: false });
-
-    // For now, just return the token (in production, send via email)
-    // TODO: Implement email sending
-    res.status(200).json({
-        success: true,
-        message: 'Password reset token generated',
-        resetToken // Remove this in production, send via email instead
-    });
-});
-
-// @desc    Reset password
-// @route   PUT /api/auth/resetpassword/:resettoken
-// @access  Public
-exports.resetPassword = asyncHandler(async (req, res, next) => {
-    // Get hashed token
-    const resetPasswordToken = crypto
-        .createHash('sha256')
-        .update(req.params.resettoken)
-        .digest('hex');
-
-    const user = await User.findOne({
-        resetPasswordToken,
-        resetPasswordExpire: { $gt: Date.now() }
-    });
-
-    if (!user) {
-        return res.status(400).json({
-            success: false,
-            message: 'Invalid or expired reset token'
-        });
-    }
-
-    // Set new password
-    user.password = req.body.password;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpire = undefined;
-    await user.save();
-
+    // Send new token
+    const user = { ...userData, _id: doc.id };
     sendTokenResponse(user, 200, res);
 });
 
 // @desc    Get all users
 // @route   GET /api/auth/users
-// @access  Private (admin only)
 exports.getUsers = asyncHandler(async (req, res, next) => {
-    const users = await User.find();
-
-    res.status(200).json({
-        success: true,
-        count: users.length,
-        data: users
+    const snapshot = await db.collection('users').get();
+    const users = [];
+    snapshot.forEach(doc => {
+        const data = doc.data();
+        delete data.password; // Don't send password
+        users.push({ ...data, _id: doc.id });
     });
+
+    res.status(200).json({ success: true, count: users.length, data: users });
+});
+
+
+// @desc    Forgot password (stub)
+exports.forgotPassword = asyncHandler(async (req, res, next) => {
+    // Simplified: Just say not implemented or log
+    res.status(501).json({ success: false, message: 'Forgot Password not implemented in Firebase Migration yet.' });
+});
+
+// @desc    Reset password (stub)
+exports.resetPassword = asyncHandler(async (req, res, next) => {
+    res.status(501).json({ success: false, message: 'not implemented' });
 });
 
 // @desc    Deactivate user
-// @route   PUT /api/auth/users/:id/deactivate
-// @access  Private (admin only)
 exports.deactivateUser = asyncHandler(async (req, res, next) => {
-    const user = await User.findByIdAndUpdate(
-        req.params.id,
-        { isActive: false },
-        { new: true }
-    );
-
-    if (!user) {
-        return res.status(404).json({
-            success: false,
-            message: 'User not found'
-        });
-    }
-
-    res.status(200).json({
-        success: true,
-        data: user
-    });
+    await db.collection('users').doc(req.params.id).update({ isActive: false });
+    res.status(200).json({ success: true, data: {} });
 });
 
 // @desc    Activate user
-// @route   PUT /api/auth/users/:id/activate
-// @access  Private (admin only)
 exports.activateUser = asyncHandler(async (req, res, next) => {
-    const user = await User.findByIdAndUpdate(
-        req.params.id,
-        { isActive: true },
-        { new: true }
-    );
-
-    if (!user) {
-        return res.status(404).json({
-            success: false,
-            message: 'User not found'
-        });
-    }
-
-    res.status(200).json({
-        success: true,
-        data: user
-    });
+    await db.collection('users').doc(req.params.id).update({ isActive: true });
+    res.status(200).json({ success: true, data: {} });
 });

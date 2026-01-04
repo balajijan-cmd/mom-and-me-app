@@ -1,223 +1,108 @@
-const Expense = require('../models/Expense');
+const { db } = require('../config/firebase');
 const { asyncHandler } = require('../middleware/errorHandler');
 
-// @desc    Get all expenses with pagination and filters
+const expensesColl = db.collection('expenses');
+
+// @desc    Get all expenses
 // @route   GET /api/expenses
-// @access  Private
 exports.getExpenses = asyncHandler(async (req, res, next) => {
-    const {
-        page = 1,
-        limit = 10,
-        startDate,
-        endDate,
-        category,
-        sortBy = '-date'
-    } = req.query;
+    let query = expensesColl;
+    const { startDate, endDate, category, sortBy = '-date' } = req.query;
 
-    // Build query
-    let query = {};
+    if (category) query = query.where('category', '==', category);
 
-    // Filter by date range
-    if (startDate || endDate) {
-        query.date = {};
-        if (startDate) query.date.$gte = new Date(startDate);
-        if (endDate) query.date.$lte = new Date(endDate);
-    }
+    // Date filtering: In Firestore, we should store date as ISO strings or timestamps. 
+    // Assuming ISO strings in 'date' field.
+    if (startDate) query = query.where('date', '>=', startDate);
+    if (endDate) query = query.where('date', '<=', endDate);
 
-    // Filter by category
-    if (category) {
-        query.category = category;
-    }
+    const snapshot = await query.get();
+    let expenses = [];
+    snapshot.forEach(doc => expenses.push({ ...doc.data(), _id: doc.id, id: doc.id }));
 
-    // Execute query with pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    // Apply sorting in memory
+    const desc = sortBy.startsWith('-');
+    const field = sortBy.replace('-', '');
 
-    const expenses = await Expense.find(query)
-        .populate('createdBy', 'fullName username')
-        .sort(sortBy)
-        .limit(parseInt(limit))
-        .skip(skip);
-
-    // Get total count for pagination
-    const total = await Expense.countDocuments(query);
-
-    res.status(200).json({
-        success: true,
-        count: expenses.length,
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-        data: expenses
+    expenses.sort((a, b) => {
+        const valA = a[field] || '';
+        const valB = b[field] || '';
+        if (valA < valB) return desc ? 1 : -1;
+        if (valA > valB) return desc ? -1 : 1;
+        return 0;
     });
+
+    res.status(200).json({ success: true, count: expenses.length, data: expenses });
 });
 
 // @desc    Get single expense
 // @route   GET /api/expenses/:id
-// @access  Private
 exports.getExpense = asyncHandler(async (req, res, next) => {
-    const expense = await Expense.findById(req.params.id)
-        .populate('createdBy', 'fullName username');
-
-    if (!expense) {
-        return res.status(404).json({
-            success: false,
-            message: 'Expense not found'
-        });
-    }
-
-    res.status(200).json({
-        success: true,
-        data: expense
-    });
+    const doc = await expensesColl.doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Not found' });
+    res.status(200).json({ success: true, data: { ...doc.data(), _id: doc.id, id: doc.id } });
 });
 
-// @desc    Create new expense
+// @desc    Create expense
 // @route   POST /api/expenses
-// @access  Private
 exports.createExpense = asyncHandler(async (req, res, next) => {
-    // Add user to request body
-    req.body.createdBy = req.user.id;
-
-    const expense = await Expense.create(req.body);
-
-    res.status(201).json({
-        success: true,
-        data: expense
-    });
+    const newExpense = {
+        ...req.body,
+        createdBy: req.user.id,
+        createdAt: new Date().toISOString()
+    };
+    const docRef = await expensesColl.add(newExpense);
+    res.status(201).json({ success: true, data: { ...newExpense, _id: docRef.id, id: docRef.id } });
 });
 
 // @desc    Update expense
 // @route   PUT /api/expenses/:id
-// @access  Private
 exports.updateExpense = asyncHandler(async (req, res, next) => {
-    let expense = await Expense.findById(req.params.id);
+    const docRef = expensesColl.doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists) return res.status(404).json({ success: false, message: 'Not found' });
 
-    if (!expense) {
-        return res.status(404).json({
-            success: false,
-            message: 'Expense not found'
-        });
-    }
-
-    expense = await Expense.findByIdAndUpdate(req.params.id, req.body, {
-        new: true,
-        runValidators: true
-    });
-
-    res.status(200).json({
-        success: true,
-        data: expense
-    });
+    await docRef.update(req.body);
+    const updated = await docRef.get();
+    res.status(200).json({ success: true, data: { ...updated.data(), _id: updated.id, id: updated.id } });
 });
 
 // @desc    Delete expense
 // @route   DELETE /api/expenses/:id
-// @access  Private
 exports.deleteExpense = asyncHandler(async (req, res, next) => {
-    const expense = await Expense.findById(req.params.id);
-
-    if (!expense) {
-        return res.status(404).json({
-            success: false,
-            message: 'Expense not found'
-        });
-    }
-
-    await expense.deleteOne();
-
-    res.status(200).json({
-        success: true,
-        message: 'Expense deleted successfully'
-    });
+    await expensesColl.doc(req.params.id).delete();
+    res.status(200).json({ success: true, message: 'Deleted' });
 });
 
 // @desc    Get expense statistics
-// @route   GET /api/expenses/stats
-// @access  Private
 exports.getExpenseStats = asyncHandler(async (req, res, next) => {
     const { startDate, endDate } = req.query;
+    let query = expensesColl;
 
-    let matchStage = {};
-    if (startDate || endDate) {
-        matchStage.date = {};
-        if (startDate) matchStage.date.$gte = new Date(startDate);
-        if (endDate) matchStage.date.$lte = new Date(endDate);
-    }
+    if (startDate) query = query.where('date', '>=', startDate);
+    if (endDate) query = query.where('date', '<=', endDate);
 
-    const stats = await Expense.aggregate([
-        { $match: matchStage },
-        {
-            $group: {
-                _id: null,
-                totalExpenses: { $sum: '$amount' },
-                count: { $sum: 1 },
-                avgExpense: { $avg: '$amount' }
-            }
-        }
-    ]);
+    const snapshot = await query.get();
+    let totalExpenses = 0;
+    let count = 0;
+    const byCategory = {};
 
-    const byCategory = await Expense.aggregate([
-        { $match: matchStage },
-        {
-            $group: {
-                _id: '$category',
-                total: { $sum: '$amount' },
-                count: { $sum: 1 }
-            }
-        },
-        { $sort: { total: -1 } }
-    ]);
+    snapshot.forEach(doc => {
+        const d = doc.data();
+        const amount = Number(d.amount) || 0;
+        totalExpenses += amount;
+        count++;
+
+        if (!byCategory[d.category]) byCategory[d.category] = { _id: d.category, total: 0, count: 0 };
+        byCategory[d.category].total += amount;
+        byCategory[d.category].count++;
+    });
 
     res.status(200).json({
         success: true,
         data: {
-            overall: stats[0] || { totalExpenses: 0, count: 0, avgExpense: 0 },
-            byCategory
+            overall: { totalExpenses, count, avgExpense: count ? totalExpenses / count : 0 },
+            byCategory: Object.values(byCategory).sort((a, b) => b.total - a.total)
         }
-    });
-});
-
-// @desc    Get monthly expense summary
-// @route   GET /api/expenses/monthly
-// @access  Private
-exports.getMonthlyExpenses = asyncHandler(async (req, res, next) => {
-    const { year = new Date().getFullYear() } = req.query;
-
-    const expenses = await Expense.aggregate([
-        {
-            $match: {
-                date: {
-                    $gte: new Date(`${year}-01-01`),
-                    $lte: new Date(`${year}-12-31`)
-                }
-            }
-        },
-        {
-            $group: {
-                _id: { $month: '$date' },
-                total: { $sum: '$amount' },
-                count: { $sum: 1 }
-            }
-        },
-        { $sort: { _id: 1 } }
-    ]);
-
-    // Format response with month names
-    const monthNames = [
-        'January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'
-    ];
-
-    const formattedExpenses = expenses.map(exp => ({
-        month: monthNames[exp._id - 1],
-        monthNumber: exp._id,
-        total: exp.total,
-        count: exp.count
-    }));
-
-    res.status(200).json({
-        success: true,
-        year: parseInt(year),
-        data: formattedExpenses
     });
 });
