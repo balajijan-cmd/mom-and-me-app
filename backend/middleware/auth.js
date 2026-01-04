@@ -60,6 +60,15 @@ exports.protect = async (req, res, next) => {
 
 // Generate JWT token
 exports.getSignedJwtToken = (userId) => {
+    if (!process.env.JWT_SECRET) {
+        console.error("❌ CRITICAL ERROR: JWT_SECRET environment variable is missing!");
+        // For production safety, do not hardcode a fallback unless absolutely necessary.
+        // But to unblock this specific debugging session if the user forgot it:
+        console.warn("⚠️ Using fallback JWT_SECRET (NOT SECURE FOR PRODUCTION) - Please set env var!");
+        return jwt.sign({ id: userId }, 'fallback_secret_key_for_debugging_only_change_me', {
+            expiresIn: process.env.JWT_EXPIRE || '24h'
+        });
+    }
     return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
         expiresIn: process.env.JWT_EXPIRE || '24h'
     });

@@ -1,53 +1,43 @@
-const API_URL = 'http://localhost:5000/api';
 
-async function createFirstAdmin() {
-    console.log('========================================');
-    console.log('  Creating First Admin User');
-    console.log('========================================\n');
+const { db } = require('./backend/config/firebase');
+const bcrypt = require('bcryptjs');
 
+const createAdmin = async () => {
     try {
-        const response = await fetch(`${API_URL}/auth/register`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                username: 'admin',
-                password: 'Admin@123',
-                fullName: 'Administrator'
-            })
-        });
+        const username = 'admin';
+        const password = 'password123';
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
 
-        const data = await response.json();
+        const newUser = {
+            username,
+            password: hashedPassword,
+            fullName: 'Admin User',
+            role: 'admin',
+            isActive: true,
+            createdAt: new Date().toISOString()
+        };
 
-        if (response.ok) {
-            console.log('✓ Admin user created successfully!\n');
-            console.log('Login Credentials:');
-            console.log('  Username: admin');
-            console.log('  Password: Admin@123\n');
-            console.log('⚠️  Please change the password after first login!\n');
+        const usersRef = db.collection('users');
+
+        // Check if exists first
+        const snapshot = await usersRef.where('username', '==', username).get();
+        if (!snapshot.empty) {
+            console.log('User already exists. Updating password...');
+            const docId = snapshot.docs[0].id;
+            await usersRef.doc(docId).update({ password: hashedPassword });
+            console.log(`Password updated for user: ${username}`);
         } else {
-            if (data.message && data.message.includes('already exists')) {
-                console.log('ℹ️  Admin user already exists!\n');
-                console.log('Login Credentials (if you haven\'t changed them):');
-                console.log('  Username: admin');
-                console.log('  Password: Admin@123\n');
-            } else {
-                console.log(`❌ Error: ${data.message || response.statusText}`);
-            }
+            await usersRef.add(newUser);
+            console.log(`Admin user created: ${username}`);
         }
-        console.log('You can now login at: http://localhost:5173\n');
 
+        console.log(`Credentials: ${username} / ${password}`);
+        process.exit(0);
     } catch (error) {
-        if (error.cause && error.cause.code === 'ECONNREFUSED') {
-            console.log('❌ Error: Backend server is not running!');
-            console.log('Please start the backend first:');
-            console.log('  cd backend');
-            console.log('  npm start\n');
-        } else {
-            console.log('❌ Error:', error.message);
-        }
+        console.error('Error creating admin:', error);
+        process.exit(1);
     }
-}
+};
 
-createFirstAdmin();
+createAdmin();
