@@ -106,3 +106,51 @@ exports.getExpenseStats = asyncHandler(async (req, res, next) => {
         }
     });
 });
+
+// @desc    Get monthly expense summary
+exports.getMonthlyExpenses = asyncHandler(async (req, res, next) => {
+    const { year = new Date().getFullYear() } = req.query;
+    const start = new Date(\\-01-01\);
+    const end = new Date(\\-12-31T23:59:59\);
+
+    // Let's stick to fetchAll and filter for now to be safe against different date formats during migration
+    let allExpenses = [];
+    const snapshot = await expensesColl.get(); 
+    snapshot.forEach(doc => allExpenses.push(doc.data()));
+
+    const yearlyExpenses = allExpenses.filter(e => {
+        const d = new Date(e.date);
+        return d >= start && d <= end;
+    });
+
+    const monthlyData = {};
+    for (let i = 1; i <= 12; i++) {
+        monthlyData[i] = { total: 0, count: 0 };
+    }
+
+    yearlyExpenses.forEach(e => {
+        const d = new Date(e.date);
+        const month = d.getMonth() + 1; // 1-12
+        monthlyData[month].total += (Number(e.amount) || 0);
+        monthlyData[month].count++;
+    });
+
+    const monthNames = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+
+    const formattedData = Object.entries(monthlyData).map(([monthNum, data]) => ({
+        month: monthNames[monthNum - 1],
+        monthNumber: parseInt(monthNum),
+        total: data.total,
+        count: data.count
+    }));
+
+    res.status(200).json({
+        success: true,
+        year: parseInt(year),
+        data: formattedData
+    });
+});
+
