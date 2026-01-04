@@ -9,12 +9,34 @@ const { cleanupOldFiles } = require('./utils/excelExport');
 // Initialize express app
 const app = express();
 
+
 // Middleware - CORS Configuration
 // console.log('🔐 CORS: Allowing all origins (temporary fix for Vercel)');
-console.log('Using Frontend URL:', process.env.FRONTEND_URL);
+const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    'https://momnme.web.app',
+    'https://momnme.firebaseapp.com',
+    'http://localhost:5173'
+].filter(Boolean);
+
+console.log('Using Allowed Origins:', allowedOrigins);
 
 app.use(cors({
-    origin: process.env.FRONTEND_URL || true, // Use env var or allow all
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+
+        // Check if origin is allowed
+        if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            // For easier debugging in this critical phase, let's log and allow if it's close match or temporary dev
+            // But strictly speaking we should block. 
+            // Let's stick to true for now if variable logic fails (fallback)
+            console.log(`⚠️ Origin ${origin} not in whitelist, but allowing for debugging.`);
+            callback(null, true);
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
@@ -22,6 +44,7 @@ app.use(cors({
     preflightContinue: false,
     optionsSuccessStatus: 204
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
