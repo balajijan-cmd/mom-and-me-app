@@ -5,9 +5,21 @@ const initializeFirebase = () => {
         let serviceAccount;
 
         // 1. Try Environment Variable (Production on Render)
-        if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-            // Parse the JSON string
-            serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+            try {
+                serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+                console.log('✅ Loaded Firebase credentials from FIREBASE_SERVICE_ACCOUNT_JSON');
+            } catch (e) {
+                console.error('❌ Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON:', e.message);
+            }
+        }
+        else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+            try {
+                serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+                console.log('✅ Loaded Firebase credentials from FIREBASE_SERVICE_ACCOUNT');
+            } catch (e) {
+                console.error('❌ Failed to parse FIREBASE_SERVICE_ACCOUNT:', e.message);
+            }
         }
         // 2. Try Local File (Development)
         else {
