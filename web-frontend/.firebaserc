@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "mom-and-me-app"
+  },
+  "targets": {
+    "mom-and-me-app": {
+      "hosting": {
+        "app": [
+          "momnme"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
