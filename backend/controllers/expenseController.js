@@ -110,12 +110,12 @@ exports.getExpenseStats = asyncHandler(async (req, res, next) => {
 // @desc    Get monthly expense summary
 exports.getMonthlyExpenses = asyncHandler(async (req, res, next) => {
     const { year = new Date().getFullYear() } = req.query;
-    const start = new Date(\\-01-01\);
-    const end = new Date(\\-12-31T23:59:59\);
+    const start = new Date(`${year}-01-01`);
+    const end = new Date(`${year}-12-31T23:59:59`);
 
     // Let's stick to fetchAll and filter for now to be safe against different date formats during migration
     let allExpenses = [];
-    const snapshot = await expensesColl.get(); 
+    const snapshot = await expensesColl.get();
     snapshot.forEach(doc => allExpenses.push(doc.data()));
 
     const yearlyExpenses = allExpenses.filter(e => {
